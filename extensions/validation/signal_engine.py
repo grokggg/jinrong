@@ -15,6 +15,10 @@ class SignalValidationEngine:
         self.db = ValidationDB(db_path)
         self.MAX_ANNUAL_DRIFT = 0.10
         self.MIN_SAMPLES_CALIBRATE = 100
+        # 熔断状态（第2轮三方审核确认的铁律）
+        self.warning_triggered = False   # 连续2季度<60%
+        self.fuse_triggered = False      # 连续4季度<55%
+        self._quarterly_accuracies = []  # 历史季度准确率记录
 
     def record_daily_signals(self, date, sentinel_result):
         """记录当日所有层级信号"""
@@ -84,8 +88,67 @@ class SignalValidationEngine:
         self.db.update_stats(report)
         return report
 
+    def check_quarterly_fuse(self):
+        """
+        季度熔断检查（第2轮三方审核确认的铁律）
+        - 连续2个季度准确率<60% → 观察预警，暂停校准
+        - 连续4个季度准确率<55% → 失效熔断，冻结参数，仅保留记录
+        返回：(warning_triggered, fuse_triggered, 说明)
+        """
+        signals = list(self.db._data['signals'].values())
+        verified = [s for s in signals if s.get('verified_60d')
+                    and s[f'result_60d'].get('is_correct') is not None]
+        if len(verified) < 20:
+            return False, False, '验证样本不足，暂不评估熔断'
+
+        # 按季度分组统计准确率
+        from collections import defaultdict
+        quarterly = defaultdict(lambda: {'correct': 0, 'total': 0})
+        for s in verified:
+            try:
+                d = datetime.strptime(s['date'], '%Y-%m-%d')
+                q = (d.year, (d.month - 1) // 3 + 1)
+                quarterly[q]['total'] += 1
+                if s['result_60d']['is_correct']:
+                    quarterly[q]['correct'] += 1
+            except Exception:
+                continue
+
+        # 取最近4个有足够样本的季度
+        recent_quarters = sorted(quarterly.keys())[-4:]
+        recent_accs = []
+        for q in recent_quarters:
+            if quarterly[q]['total'] >= 5:
+                acc = quarterly[q]['correct'] / quarterly[q]['total']
+                recent_accs.append(acc)
+
+        if len(recent_accs) < 2:
+            return False, False, '有效季度不足，暂不评估熔断'
+
+        # 连续2季度<60% → 观察预警
+        warning = len(recent_accs) >= 2 and all(a < 0.60 for a in recent_accs[-2:])
+        # 连续4季度<55% → 失效熔断
+        fuse = len(recent_accs) >= 4 and all(a < 0.55 for a in recent_accs[-4:])
+
+        self.warning_triggered = warning
+        self.fuse_triggered = fuse
+
+        if fuse:
+            return True, True, '🚨 失效熔断：连续4季度准确率<55%，冻结所有参数调整，仅保留记录功能'
+        elif warning:
+            return True, False, '⚠️ 观察预警：连续2季度准确率<60%，暂停校准，进入观察期'
+        else:
+            return False, False, f'正常：最近季度准确率 {[f"{a*100:.0f}%" for a in recent_accs]}'
+
     def adaptive_calibrate(self, current_params):
-        """渐进式参数校准（样本不足不校准）"""
+        """渐进式参数校准（样本不足不校准，熔断触发不校准）"""
+        # 熔断检查优先：触发预警或熔断时拒绝校准
+        warning, fuse, msg = self.check_quarterly_fuse()
+        if fuse:
+            return current_params, False, msg
+        if warning:
+            return current_params, False, msg
+
         report = self.get_accuracy_report()
         verified = report['verified_60d']
         if verified < self.MIN_SAMPLES_CALIBRATE:

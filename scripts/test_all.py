@@ -59,6 +59,10 @@ def test_validation():
     engine = SignalValidationEngine(db_path='/tmp/test_engine.json')
     report = engine.get_accuracy_report()
     test("准确率报告生成", 'total_signals' in report)
+    # 熔断检查方法存在性
+    test("季度熔断方法存在", hasattr(engine, 'check_quarterly_fuse'))
+    w, f, msg = engine.check_quarterly_fuse()
+    test("样本不足时不触发熔断", not w and not f)
 
 
 def test_p0():

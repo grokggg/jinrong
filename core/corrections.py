@@ -44,8 +44,11 @@ class CorrectionEngine:
 
     def calc_w_s(self, close_series, wavelet_level=3):
         """
-        W_S 多尺度结构校正（WD-SSM 简化版）
-        逻辑：多尺度分解后高频能量占比升高 → 结构风险 → 降仓
+        W_S 多尺度结构校正（WD-SSM 简化实现版）
+        对话中定义为 WD-SSM 小波分解结构风险保护器；
+        代码中用"短期波动率/长期波动率能量比"作为可计算代理，
+        避免引入 pywt 额外依赖，保持核心层极简。
+        逻辑：高频能量占比升高 → 结构风险 → 降仓
         """
         close = close_series.dropna()
         if len(close) < 60:
